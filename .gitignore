@@ -46,3 +46,6 @@ check_*.py
 # IDE/OS
 .DS_Store
 Thumbs.db
+
+# Old versions archive
+old/
