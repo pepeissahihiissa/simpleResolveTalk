@@ -1,0 +1,743 @@
+import os
+import sys
+import random
+import re
+import time
+
+# ==============================================================================
+# ユーザー設定
+# ==============================================================================
+BLOCK_FRAMES = 10  # 1ブロックの基本フレーム数 (10f)
+STOP_FLAG_FILE = "stop_flag.txt"  # このファイルを作成すると安全停止
+STOP_CHECK_PATHS = None  # 起動時に決定
+
+# --- 可変ブロックサイズ設定 ---
+USE_VARIABLE_BLOCK = True  # True: 10f/30f/60fを使い分け / False: 従来の10f固定
+# 60f→30f→10fの順にフォールバック（高サイズの素材がない場合は自動的に低サイズに）
+SKIP_SETPROPERTY = True   # True: SetPropertyを一切実行しない（事前に画像を変形済の場合）
+SKIP_OCCUPIED_RANGES = True  # True: 配置先トラックに既存クリップがある区間をスキップ
+
+# メディアプール内での連番PNGの登録名（10fブロック）
+NORMAL_CLIP_NAME = "normal_[0000-0009].png"
+TALK_CLIP_NAME   = "talk_[0000-0009].png"
+BLINK_CLIP_NAME  = "blink_[0000-0009].png"
+
+# 30fブロック用（可変ブロックモード）
+NORMAL_30F_CLIP_NAME = "normal_30f_[0000-0029].png"
+TALK_30F_A_CLIP_NAME = "talk_30f_a_[0000-0029].png"
+TALK_30F_B_CLIP_NAME = "talk_30f_b_[0000-0029].png"
+BLINK_30F_CLIP_NAME  = "blink_30f_[0000-0029].png"
+
+# 60fブロック用（可変ブロックモード）
+NORMAL_60F_CLIP_NAME = "normal_60f_[0000-0059].png"
+TALK_60F_A_CLIP_NAME = "talk_60f_a_[0000-0059].png"
+TALK_60F_B_CLIP_NAME = "talk_60f_b_[0000-0059].png"
+BLINK_60F_CLIP_NAME  = "blink_60f_[0000-0059].png"
+
+VIDEO_TRACK = 2  # キャラクターを配置するトラック
+AUDIO_TRACK = 1  # セリフが配置されているトラック
+
+# ==============================================================================
+# ユーティリティ関数
+# ==============================================================================
+def find_clip(folder, clip_name):
+    """メディアプール内を再帰的に検索して指定された名前のクリップを返す"""
+    for clip in folder.GetClipList():
+        if clip.GetName() == clip_name:
+            return clip
+    for subfolder in folder.GetSubFolderList():
+        result = find_clip(subfolder, clip_name)
+        if result:
+            return result
+    return None
+
+def clear_track_clips(timeline, track_type, track_index):
+    """指定されたトラック上の既存クリップをすべて削除する（上書きバグ防止用）"""
+    items = timeline.GetItemListInTrack(track_type, track_index)
+    if items:
+        # APIの仕様上、DeleteClipsにはリストで渡す必要があります
+        timeline.DeleteClips(items)
+        print(f"[INFO] トラック {track_type} {track_index} の既存クリップをクリアしました。")
+
+def parse_timecode(tc_str, fps):
+    """'01:00:00:00' → フレーム数"""
+    if not tc_str or not isinstance(tc_str, str):
+        return 0
+    parts = tc_str.split(":")
+    if len(parts) == 4:
+        try:
+            return int(parts[0]) * 3600 * fps + int(parts[1]) * 60 * fps + int(parts[2]) * fps + int(parts[3])
+        except ValueError:
+            return 0
+    return 0
+
+def detect_start_offset(timeline, project, fps=60):
+    """タイムラインの開始タイムコードを自動検出"""
+    try:
+        tc = timeline.GetStartTimecode()
+        offset = parse_timecode(tc, fps)
+        print(f"[INFO] 開始タイムコード: '{tc}' → {offset}f (fps={fps})")
+        return offset
+    except Exception as e:
+        print(f"[WARN] 開始タイムコード取得失敗: {e}")
+        try:
+            min_frame = None
+            for ti in range(1, timeline.GetTrackCount("video") + 1):
+                for item in timeline.GetItemListInTrack("video", ti):
+                    s = item.GetStart()
+                    if min_frame is None or s < min_frame:
+                        min_frame = s
+            if min_frame is not None and min_frame > 0:
+                print(f"[INFO] 先頭クリップ位置から推定: {min_frame}f")
+                return min_frame
+        except:
+            pass
+        return 0
+
+# ==============================================================================
+# メイン処理
+# ==============================================================================
+def main():
+    print("=" * 60)
+    print(" キャラクター自動口パク・まばたき配置システム (v2.0 可変ブロック対応)")
+    print("=" * 60)
+
+    # 1. 停止フラグの検索パスを初期化
+    global STOP_CHECK_PATHS
+    check_paths = set()
+    check_paths.add(os.getcwd())
+    # sys.argv[0] がスクリプトパスの場合
+    try:
+        sp = os.path.dirname(os.path.abspath(sys.argv[0]))
+        if os.path.isdir(sp):
+            check_paths.add(sp)
+    except:
+        pass
+    # デスクトップとTEMPも対象に（ユーザーが書き込み可能な場所）
+    for env_key in ['USERPROFILE', 'HOME']:
+        val = os.environ.get(env_key)
+        if val:
+            dp = os.path.join(val, 'Desktop')
+            if os.path.isdir(dp):
+                check_paths.add(dp)
+    tmp = os.environ.get('TEMP')
+    if tmp and os.path.isdir(tmp):
+        check_paths.add(tmp)
+    STOP_CHECK_PATHS = [os.path.normpath(p) for p in sorted(check_paths)]
+    print("[INFO] 停止フラグ監視パス:")
+    for p in STOP_CHECK_PATHS:
+        print(f"       {os.path.join(p, STOP_FLAG_FILE)}")
+    print(f"       上記いずれかに stop_flag.txt を作成すると安全停止します")
+
+    # 2. Resolve APIの初期化チェック
+    try:
+        pm = resolve.GetProjectManager()
+        project = pm.GetCurrentProject()
+        if not project:
+            raise ValueError("現在開いているプロジェクトが見つかりません。")
+        
+        timeline = project.GetCurrentTimeline()
+        if not timeline:
+            raise ValueError("アクティブなタイムラインが見つかりません。編集用のタイムラインを開いてください。")
+        
+        media_pool = project.GetMediaPool()
+        root = media_pool.GetRootFolder()
+    except NameError:
+        print("[ERROR] 'resolve' オブジェクトが見つかりません。")
+        print("        このスクリプトはDaVinci Resolve内部のコンソール、または外部API連携から実行してください。")
+        return
+    except Exception as e:
+        print(f"[ERROR] 初期化エラー: {e}")
+        return
+
+    # フレームレート自動検出
+    try:
+        fps_raw = project.GetSetting("timelineFrameRate")
+        match = re.search(r"([\d.]+)", str(fps_raw))
+        FPS = float(match.group(1)) if match else 60.0
+        FPS = round(FPS)
+        print(f"[INFO] フレームレート: {FPS}fps (raw='{fps_raw}')")
+    except Exception as e:
+        print(f"[WARN] FPS取得失敗: {e}")
+        FPS = 60
+
+    # 開始タイムコードから配置オフセット検出
+    OFFSET_FRAME = detect_start_offset(timeline, project, FPS)
+
+    # 2. メディアプールからの素材取得
+    normal_clip = find_clip(root, NORMAL_CLIP_NAME)
+    talk_clip = find_clip(root, TALK_CLIP_NAME)
+    blink_clip = find_clip(root, BLINK_CLIP_NAME)
+
+    if not all([normal_clip, talk_clip, blink_clip]):
+        print("[ERROR] メディアプールに必要な連番PNG素材が見つかりません。名称を確認してください。")
+        print(f"        通常(Normal): {'〇' if normal_clip else '×'} ({NORMAL_CLIP_NAME})")
+        print(f"        口開(Talk)  : {'〇' if talk_clip else '×'} ({TALK_CLIP_NAME})")
+        print(f"        目閉(Blink) : {'〇' if blink_clip else '×'} ({BLINK_CLIP_NAME})")
+        return
+    print("[INFO] 10fブロック素材を検出しました。")
+
+    # 30f/60f素材の検出（可変ブロックモード）
+    vb_60f = False
+    vb_30f = False
+    normal_30f = talk_30f_a = talk_30f_b = blink_30f = None
+    normal_60f = talk_60f_a = talk_60f_b = blink_60f = None
+
+    if USE_VARIABLE_BLOCK:
+        normal_60f = find_clip(root, NORMAL_60F_CLIP_NAME)
+        talk_60f_a = find_clip(root, TALK_60F_A_CLIP_NAME)
+        talk_60f_b = find_clip(root, TALK_60F_B_CLIP_NAME)
+        blink_60f  = find_clip(root, BLINK_60F_CLIP_NAME)
+        vb_60f = all([normal_60f, talk_60f_a, talk_60f_b, blink_60f])
+
+        normal_30f = find_clip(root, NORMAL_30F_CLIP_NAME)
+        talk_30f_a = find_clip(root, TALK_30F_A_CLIP_NAME)
+        talk_30f_b = find_clip(root, TALK_30F_B_CLIP_NAME)
+        blink_30f  = find_clip(root, BLINK_30F_CLIP_NAME)
+        vb_30f = all([normal_30f, talk_30f_a, talk_30f_b, blink_30f])
+
+        if vb_60f:
+            print("[INFO] 60f/30f/10f全ブロック素材を検出。可変ブロックモード（60f優先）で動作します。")
+        elif vb_30f:
+            print("[INFO] 30f/10fブロック素材を検出。可変ブロックモード（30fまで）で動作します。")
+        else:
+            print("[WARN] 30f/60fブロック素材が見つかりません。10f固定モードにフォールバックします。")
+            print(f"        30f: normal={'〇' if normal_30f else '×'} talk_a={'〇' if talk_30f_a else '×'} talk_b={'〇' if talk_30f_b else '×'} blink={'〇' if blink_30f else '×'}")
+            print(f"        60f: normal={'〇' if normal_60f else '×'} talk_a={'〇' if talk_60f_a else '×'} talk_b={'〇' if talk_60f_b else '×'} blink={'〇' if blink_60f else '×'}")
+    else:
+        vb_30f = vb_60f = False
+
+    # 3. 既存のキャラクター用トラックから位置情報の取得
+    video_items = timeline.GetItemListInTrack("video", VIDEO_TRACK)
+    
+    # デフォルトの変形パラメータ (何も配置されていない場合のバックアップ)
+    transform_props = {"Pan": 0.0, "Tilt": 0.0, "ZoomX": 1.0, "ZoomY": 1.0}
+    
+    if video_items:
+        # トラック2に既に存在する「最初のクリップ」を基準として座標・ズームを読み取る
+        base_item = sorted(video_items, key=lambda x: x.GetStart())[0]
+        try:
+            transform_props["Pan"]   = base_item.GetProperty("Pan")
+            transform_props["Tilt"]  = base_item.GetProperty("Tilt")
+            transform_props["ZoomX"] = base_item.GetProperty("ZoomX")
+            transform_props["ZoomY"] = base_item.GetProperty("ZoomY")
+            print("[INFO] 既存クリップから位置情報を取得しました:")
+            print(f"       位置(X, Y): ({transform_props['Pan']}, {transform_props['Tilt']})")
+            print(f"       ズーム(X, Y): ({transform_props['ZoomX']}, {transform_props['ZoomY']})")
+        except Exception as e:
+            print(f"[WARNING] 位置情報の取得に失敗しました(デフォルト値を使用します): {e}")
+    else:
+        print("[WARNING] ビデオトラックに基準となるクリップがありません。デフォルト位置(中央・等倍)で配置します。")
+
+    # 4. オーディオトラックの解析
+    audio_items = timeline.GetItemListInTrack("audio", AUDIO_TRACK)
+    if not audio_items:
+        print(f"[ERROR] オーディオトラック {AUDIO_TRACK} に音声クリップが配置されていません。")
+        return
+    
+    audio_items = sorted(audio_items, key=lambda item: item.GetStart())
+    audio_ranges = [(item.GetStart(), item.GetEnd()) for item in audio_items]
+    timeline_end = timeline.GetEndFrame()
+    
+    # 5. 既存クリップの占有範囲を記録（配置スキップ用）
+    skip_ranges = []      # (expanded_s, expanded_e) 配置スキップ用
+    skip_raw_ranges = []  # (raw_s, raw_e) 隙間埋め用（実位置）
+    if SKIP_OCCUPIED_RANGES:
+        existing = timeline.GetItemListInTrack("video", VIDEO_TRACK)
+        if existing and len(existing) <= 50:  # 50以下＝手動プレースホルダー → トラックを残す
+            for item in existing:
+                s_raw, e_raw = item.GetStart(), item.GetEnd()
+                clip_name = getattr(item, "GetName", lambda: "unknown")()
+                # 10fブロック境界に拡張（端数ギャップ防止）
+                s = (s_raw // 10) * 10
+                e = ((e_raw + 9) // 10) * 10
+                skip_ranges.append((s, e))
+                skip_raw_ranges.append((s_raw, e_raw))
+                def fc(f):
+                    m = f // (60*FPS)
+                    s = (f % (60*FPS)) // FPS
+                    fr = f % FPS
+                    return f"{m:02d}:{s:02d}:{fr:02d}"
+                print(f"[DEBUG] 既存クリップ検出: '{clip_name}' raw={s_raw}-{e_raw} ({fc(s_raw)}-{fc(e_raw)}) -> expanded={s}-{e} ({fc(s)}-{fc(e)})")
+            print(f"[INFO] トラック{VIDEO_TRACK}に {len(skip_ranges)} 個の占有区間を検出しました（プレースホルダー維持・該当区間をスキップします）")
+        elif existing:
+            print(f"[INFO] トラック{VIDEO_TRACK}に {len(existing)} 個のクリップがあります（スクリプト前回実行と判断、クリアして再配置します）")
+            clear_track_clips(timeline, "video", VIDEO_TRACK)
+        else:
+            pass  # トラック空 → 通常通り配置
+    else:
+        # SKIP_OCCUPIED_RANGES=False → 従来通りクリア
+        clear_track_clips(timeline, "video", VIDEO_TRACK)
+
+    def in_skip_zone(frame, duration):
+        fe = frame + duration
+        for s, e in skip_ranges:
+            if not (e <= frame or s >= fe):
+                return True
+        return False
+
+    # 6. ヘルパー関数: バッファ追加と一括配置
+    def flush_buffer(items_buf):
+        if not items_buf:
+            return 0
+        new_items = media_pool.AppendToTimeline(items_buf)
+        if not new_items:
+            print(f"[ERROR] バッチ配置失敗 (frame {items_buf[0]['recordFrame']})")
+            return -1
+        if not SKIP_SETPROPERTY:
+            for new_clip in new_items:
+                try:
+                    for prop_name, prop_value in transform_props.items():
+                        new_clip.SetProperty(prop_name, prop_value)
+                except Exception as e:
+                    print(f"[WARNING] SetProperty失敗: {e}")
+        else:
+            pass  # SKIP_SETPROPERTY=True: SetPropertyを実行しない
+        return len(items_buf)
+
+    def push_item(buf, clip, frame, duration):
+        buf.append({
+            "mediaPoolItem": clip,
+            "startFrame": 0,
+            "endFrame": duration,
+            "recordFrame": frame,
+            "trackIndex": VIDEO_TRACK
+        })
+        if len(buf) >= 50:
+            return True
+        return False
+
+    def check_stop_flag():
+        for base in STOP_CHECK_PATHS:
+            for suffix in ["", ".txt"]:
+                fp = os.path.join(base, STOP_FLAG_FILE + suffix)
+                if os.path.exists(fp):
+                    try:
+                        os.remove(fp)
+                    except:
+                        pass
+                    return fp
+        return None
+
+    # ==========================================================================
+    # 6. タイムライン生成
+    # ==========================================================================
+    print("[INFO] タイムラインの構築を開始します...")
+    total_blocks = (timeline_end - OFFSET_FRAME + BLOCK_FRAMES - 1) // BLOCK_FRAMES
+    print(f"[INFO] 総フレーム数: {timeline_end - OFFSET_FRAME} / ブロック数: {total_blocks}")
+    start_time = time.time()
+    buffer_items = []
+    success_count = 0
+    stopped = False
+
+    # -------------------------------------------------------------------------
+    # 6-a. 従来方式（10f固定）
+    # -------------------------------------------------------------------------
+    if not (vb_30f or vb_60f):
+        print("[INFO] 10f固定モードで配置します...")
+        current_frame = OFFSET_FRAME
+        next_blink_frame = random.randint(5 * FPS, 10 * FPS)
+        is_last_talk = False
+        progress_last = -1
+
+        while current_frame < timeline_end:
+            block_start = current_frame
+            block_end = current_frame + BLOCK_FRAMES
+
+            # 停止フラグ
+            flag = check_stop_flag()
+            if flag:
+                print(f"[STOP] 停止フラグを検出: {flag}")
+                stopped = True
+                break
+
+            # 進捗
+            total_range = timeline_end - OFFSET_FRAME
+            done = current_frame - OFFSET_FRAME
+            progress = 100 * done // total_range if total_range else 0
+            if progress > progress_last:
+                progress_last = progress
+                print(f"[PROGRESS] {progress}% ({done}/{total_range}) 経過:{time.time()-start_time:.1f}秒")
+
+            # 音声判定
+            has_audio = False
+            for s, e in audio_ranges:
+                if not (e <= block_start or s >= block_end):
+                    has_audio = True
+                    break
+
+            # 状態決定
+            clip = normal_clip
+            if has_audio:
+                if is_last_talk:
+                    clip = normal_clip
+                    is_last_talk = False
+                else:
+                    clip = talk_clip
+                    is_last_talk = True
+            else:
+                is_last_talk = False
+
+            # まばたき
+            if current_frame >= next_blink_frame and clip == normal_clip:
+                clip = blink_clip
+                next_blink_frame = current_frame + random.randint(5 * FPS, 10 * FPS)
+
+            if SKIP_OCCUPIED_RANGES and in_skip_zone(block_start, BLOCK_FRAMES):
+                pass
+            elif push_item(buffer_items, clip, block_start, BLOCK_FRAMES):
+                cnt = flush_buffer(buffer_items)
+                if cnt >= 0: success_count += cnt
+                buffer_items = []
+
+            current_frame = block_end
+
+        # 最終バッファフラッシュ
+        if buffer_items:
+            cnt = flush_buffer(buffer_items)
+            if cnt >= 0: success_count += cnt
+            buffer_items = []
+
+    # -------------------------------------------------------------------------
+    # 6-b. 可変ブロック方式（10f/30f/60f）
+    # -------------------------------------------------------------------------
+    else:
+        max_block_level = 6 if vb_60f else (3 if vb_30f else 1)
+        size_parts = [p for p in ["30f","60f"] if (p=="30f" and vb_30f) or (p=="60f" and vb_60f)]
+        print(f"[INFO] 可変ブロック方式（10f{'/' + '/'.join(size_parts) if size_parts else ''}）で配置します...")
+
+        # 発話区間を10f境界にトリミングして事前計算
+        #  audio [s, e) → talk有効範囲 [ceil(s/10)*10, floor(e/10)*10)
+        def frame_to_tc(f, fps=FPS):
+            h = f // (3600 * fps)
+            m = (f % (3600 * fps)) // (60 * fps)
+            s = (f % (60 * fps)) // fps
+            fr = f % fps
+            return f"{h:02d}:{m:02d}:{s:02d}:{fr:02d}"
+
+        talk_valid_ranges = []
+        for s, e in audio_ranges:
+            s10 = ((s + 9) // 10) * 10
+            e10 = (e // 10) * 10
+            if s10 < e10:
+                talk_valid_ranges.append((s10, e10))
+            else:
+                print(f"[DEBUG] 音声 {s}-{e} ({frame_to_tc(s)}-{frame_to_tc(e)}) は10f未満のため talk から除外")
+
+        print(f"[DEBUG] 音声区間: {[(s, e, frame_to_tc(s), frame_to_tc(e)) for s, e in audio_ranges]}")
+        print(f"[DEBUG] talk有効範囲(10f境界): {[(s, e, frame_to_tc(s), frame_to_tc(e)) for s, e in talk_valid_ranges]}")
+
+        # Phase 1: 10fブロック単位で全フレームの状態を事前決定
+        block_states = [None] * total_blocks
+        is_last_talk = False
+        next_blink_frame = random.randint(5 * FPS, 10 * FPS)
+        cur = OFFSET_FRAME
+
+        for bi in range(total_blocks):
+            bs = cur
+            be = cur + BLOCK_FRAMES
+
+# 発話判定：ブロックがトリミング済み発話範囲に完全内包されているか
+            has_audio = False
+            for s, e in talk_valid_ranges:
+                if s <= bs and be <= e:
+                    has_audio = True
+                    break
+
+            if has_audio:
+                if is_last_talk:
+                    block_states[bi] = "normal"
+                    is_last_talk = False
+                else:
+                    block_states[bi] = "talk"
+                    is_last_talk = True
+            else:
+                block_states[bi] = "normal"
+                is_last_talk = False
+
+            # まばたき
+            if cur >= next_blink_frame and block_states[bi] == "normal":
+                block_states[bi] = "blink"
+                next_blink_frame = cur + random.randint(5 * FPS, 10 * FPS)
+
+            cur = be
+
+        # block_states サマリ（talk/normal/blink の切り替わり位置）
+        prev_state = None
+        talk_segments = []
+        seg_start = None
+        for bi, st in enumerate(block_states):
+            if st != prev_state:
+                if prev_state == "talk" and seg_start is not None:
+                    talk_segments.append((seg_start, bi))
+                if st == "talk":
+                    seg_start = bi
+                prev_state = st
+        if prev_state == "talk" and seg_start is not None:
+            talk_segments.append((seg_start, len(block_states)))
+        
+        print(f"[DEBUG] talkブロック区間: {[(s, e, s*10+OFFSET_FRAME, e*10+OFFSET_FRAME) for s, e in talk_segments]}")
+
+        # Phase 2: 音声区間ベースでブロックをグループ化し最適サイズで配置
+        skip_blocks = [in_skip_zone(OFFSET_FRAME + bi * BLOCK_FRAMES, BLOCK_FRAMES) for bi in range(total_blocks)]
+        bi = 0
+        total_placed_frames = 0
+        progress_last = -1
+        buf_items = []
+        last_placed_end = OFFSET_FRAME  # 直前に配置したクリップの終端フレーム
+
+        def fill_gap_if_needed(target_frame):
+            """target_frame と last_placed_end の間に 1-9f の隙間があれば normal で埋める"""
+            nonlocal last_placed_end, success_count, buf_items
+            if target_frame <= last_placed_end:
+                return
+            gap = target_frame - last_placed_end
+            if 0 < gap < BLOCK_FRAMES:
+                print(f"[DEBUG] 隙間埋め: {last_placed_end}-{target_frame} ({frame_to_tc(last_placed_end)}-{frame_to_tc(target_frame)}) gap={gap}f")
+                place_short_normal(last_placed_end, gap)
+
+        def place_short_normal(frame, duration):
+            """normalクリップの先頭 duration フレームだけで短く配置"""
+            nonlocal success_count, buf_items, last_placed_end
+            # normal_clip は 10f の連番。startFrame=0, endFrame=duration で先頭 duration フレームのみ使用
+            if push_item(buf_items, normal_clip, frame, duration):
+                cnt = flush_buffer(buf_items)
+                if cnt >= 0:
+                    success_count += cnt
+                buf_items = []
+            last_placed_end = frame + duration
+
+        def place_and_buf(clip_obj, frame, duration):
+            nonlocal success_count, buf_items, last_placed_end
+            if SKIP_OCCUPIED_RANGES and in_skip_zone(frame, duration):
+                return
+            # 隙間があれば埋める
+            fill_gap_if_needed(frame)
+            # クリップ種類を特定してログ
+            clip_name = getattr(clip_obj, "GetName", lambda: "unknown")()
+            clip_type = "talk" if "talk" in clip_name.lower() else ("blink" if "blink" in clip_name.lower() else "normal")
+            print(f"[DEBUG] 配置: {clip_type} {frame}-{frame+duration} ({frame_to_tc(frame)}-{frame_to_tc(frame+duration)}) [{clip_name}] dur={duration}")
+            if push_item(buf_items, clip_obj, frame, duration):
+                cnt = flush_buffer(buf_items)
+                if cnt >= 0: success_count += cnt
+                buf_items = []
+            # 配置予定の終端を更新（バッファ flush 時に実際に配置される）
+            last_placed_end = frame + duration
+
+        def has_audio_at(block_idx):
+            bs = OFFSET_FRAME + block_idx * BLOCK_FRAMES
+            be = bs + BLOCK_FRAMES
+            for s, e in talk_valid_ranges:
+                if not (e <= bs or s >= be):
+                    return True
+            return False
+
+        def check_pattern(offset, pattern):
+            for pi, expected in enumerate(pattern):
+                if block_states[offset + pi] != expected:
+                    return False
+            return True
+
+        while bi < total_blocks:
+            # 停止フラグ
+            flag = check_stop_flag()
+            if flag:
+                print(f"[STOP] 停止フラグを検出: {flag}")
+                stopped = True
+                if buf_items:
+                    cnt = flush_buffer(buf_items)
+                    if cnt >= 0: success_count += cnt
+                    buf_items = []
+                break
+
+            # 進捗
+            total_range = timeline_end - OFFSET_FRAME
+            done = bi * BLOCK_FRAMES
+            cur_frame = OFFSET_FRAME + done
+            progress = 100 * done // total_range if total_range else 0
+            if progress > progress_last:
+                progress_last = progress
+                print(f"[PROGRESS] {progress}% ({done}/{total_range}) 経過:{time.time()-start_time:.1f}秒")
+
+            state = block_states[bi]
+            block_frame = OFFSET_FRAME + bi * BLOCK_FRAMES
+
+            # スキップゾーン内のブロック → 単独スキップ
+            if skip_blocks[bi]:
+                print(f"[DEBUG] スキップ: block {bi} {block_frame}-{block_frame+BLOCK_FRAMES} ({frame_to_tc(block_frame)}-{frame_to_tc(block_frame+BLOCK_FRAMES)})")
+                total_placed_frames += BLOCK_FRAMES
+                bi += 1
+                continue
+
+            # ----------------------------------------------------------------
+            # まばたき: 常に10f単独
+            # ----------------------------------------------------------------
+            if state == "blink":
+                place_and_buf(blink_clip, block_frame, BLOCK_FRAMES)
+                total_placed_frames += BLOCK_FRAMES
+                bi += 1
+                continue
+
+            # ----------------------------------------------------------------
+            # 音声区間（talk / normal-in-talk の交互パターン）
+            # ----------------------------------------------------------------
+            if has_audio_at(bi):
+                # 音声区間の連続長を数える
+                seg_len = 0
+                while bi + seg_len < total_blocks and has_audio_at(bi + seg_len):
+                    if block_states[bi + seg_len] == "blink" or skip_blocks[bi + seg_len]:
+                        break
+                    seg_len += 1
+                if seg_len < 1:
+                    bi += 1
+                    continue
+
+                # 6ブロック → 60f
+                if max_block_level >= 6:
+                    while seg_len >= 6:
+                        if check_pattern(bi, ["talk","normal","talk","normal","talk","normal"]):
+                            place_and_buf(talk_60f_a, block_frame, BLOCK_FRAMES * 6)
+                            total_placed_frames += BLOCK_FRAMES * 6
+                            block_frame += BLOCK_FRAMES * 6; bi += 6; seg_len -= 6
+                            continue
+                        if check_pattern(bi, ["normal","talk","normal","talk","normal","talk"]):
+                            place_and_buf(talk_60f_b, block_frame, BLOCK_FRAMES * 6)
+                            total_placed_frames += BLOCK_FRAMES * 6
+                            block_frame += BLOCK_FRAMES * 6; bi += 6; seg_len -= 6
+                            continue
+                        break
+
+                # 3ブロック → 30f
+                while seg_len >= 3:
+                    p0 = block_states[bi]
+                    p1 = block_states[bi + 1]
+                    p2 = block_states[bi + 2]
+                    if p0 == "blink" or p1 == "blink" or p2 == "blink":
+                        break
+                    if p0 == "talk" and p1 == "normal" and p2 == "talk":
+                        place_and_buf(talk_30f_a, block_frame, BLOCK_FRAMES * 3)
+                        total_placed_frames += BLOCK_FRAMES * 3
+                        block_frame += BLOCK_FRAMES * 3; bi += 3; seg_len -= 3
+                        continue
+                    if p0 == "normal" and p1 == "talk" and p2 == "normal":
+                        place_and_buf(talk_30f_b, block_frame, BLOCK_FRAMES * 3)
+                        total_placed_frames += BLOCK_FRAMES * 3
+                        block_frame += BLOCK_FRAMES * 3; bi += 3; seg_len -= 3
+                        continue
+                    break
+
+                # 残りは10f単位
+                while seg_len >= 1:
+                    clip_to_use = talk_clip if block_states[bi] == "talk" else normal_clip
+                    place_and_buf(clip_to_use, block_frame, BLOCK_FRAMES)
+                    total_placed_frames += BLOCK_FRAMES
+                    block_frame += BLOCK_FRAMES; bi += 1; seg_len -= 1
+
+            # ----------------------------------------------------------------
+            # 無音区間（通常状態、まばたきを除く）
+            # ----------------------------------------------------------------
+            else:
+                norm_len = 0
+                while bi + norm_len < total_blocks:
+                    s = block_states[bi + norm_len]
+                    if s != "normal" or skip_blocks[bi + norm_len]:
+                        break
+                    norm_len += 1
+                if norm_len < 1:
+                    bi += 1
+                    continue
+
+                # 60f優先 → 30f → 10f
+                if max_block_level >= 6:
+                    while norm_len >= 6:
+                        place_and_buf(normal_60f, block_frame, BLOCK_FRAMES * 6)
+                        total_placed_frames += BLOCK_FRAMES * 6
+                        block_frame += BLOCK_FRAMES * 6; bi += 6; norm_len -= 6
+                while norm_len >= 3:
+                    place_and_buf(normal_30f, block_frame, BLOCK_FRAMES * 3)
+                    total_placed_frames += BLOCK_FRAMES * 3
+                    block_frame += BLOCK_FRAMES * 3; bi += 3; norm_len -= 3
+                while norm_len >= 1:
+                    place_and_buf(normal_clip, block_frame, BLOCK_FRAMES)
+                    total_placed_frames += BLOCK_FRAMES
+                    block_frame += BLOCK_FRAMES; bi += 1; norm_len -= 1
+
+        # バッファフラッシュ
+        if buf_items:
+            cnt = flush_buffer(buf_items)
+            if cnt >= 0: success_count += cnt
+            buf_items = []
+
+        # スキップゾーン境界の端数隙間を埋める（1-9f）— raw位置（実プレースホルダー位置）で判定
+        if SKIP_OCCUPIED_RANGES and skip_raw_ranges:
+            try:
+                final_items = sorted(timeline.GetItemListInTrack("video", VIDEO_TRACK) or [], key=lambda x: x.GetStart())
+                for s_raw, e_raw in skip_raw_ranges:
+                    # 前側端数: ゾーン直前の配置クリップと 実プレースホルダー開始(s_raw) の間
+                    prev_items = [it for it in final_items if it.GetEnd() <= s_raw]
+                    if prev_items:
+                        last_end = max(it.GetEnd() for it in prev_items)
+                        gap = s_raw - last_end
+                        if 0 < gap < BLOCK_FRAMES:
+                            print(f"[DEBUG] スキップ前端数埋め: {last_end}-{s_raw} gap={gap}f")
+                            place_short_normal(last_end, gap)
+                            final_items = sorted(timeline.GetItemListInTrack("video", VIDEO_TRACK) or [], key=lambda x: x.GetStart())
+                    # 後側端数: 実プレースホルダー終了(e_raw) と次の配置クリップの間
+                    next_items = [it for it in final_items if it.GetStart() >= e_raw]
+                    if next_items:
+                        next_start = min(it.GetStart() for it in next_items)
+                        gap = next_start - e_raw
+                        if 0 < gap < BLOCK_FRAMES:
+                            print(f"[DEBUG] スキップ後端数埋め: {e_raw}-{next_start} gap={gap}f")
+                            place_short_normal(e_raw, gap)
+                            final_items = sorted(timeline.GetItemListInTrack("video", VIDEO_TRACK) or [], key=lambda x: x.GetStart())
+            except Exception as ex:
+                print(f"[INFO] スキップ境界端数埋めスキップ: {ex}")
+
+        # 隙間埋めバッファをフラッシュ
+        if buf_items:
+            cnt = flush_buffer(buf_items)
+            if cnt >= 0: success_count += cnt
+            buf_items = []
+
+        success_count = total_placed_frames // BLOCK_FRAMES
+
+    # 隙間検証（配置後トラックを読み戻して確認）
+    if SKIP_OCCUPIED_RANGES and skip_ranges:
+        try:
+            final_items = sorted(timeline.GetItemListInTrack("video", VIDEO_TRACK) or [], key=lambda x: x.GetStart())
+            gaps = []
+            prev_end = OFFSET_FRAME
+            for item in final_items:
+                s = item.GetStart()
+                e = item.GetEnd()
+                if s > prev_end:
+                    in_skip_only = all(
+                        any(sr <= f < er for sr, er in skip_ranges)
+                        for f in range(prev_end, min(s, prev_end + 2000))
+                    )
+                    if not in_skip_only:
+                        gaps.append((prev_end, s))
+                prev_end = max(prev_end, e)
+            if gaps:
+                gap_frames = sum(e - s for s, e in gaps)
+                print(f"[WARNING] 隙間が {len(gaps)} 箇所 ({gap_frames}f) 見つかりました")
+                for s, e in gaps[:5]:
+                    print(f"          フレーム {s}-{e} ({e-s}f)")
+            else:
+                print(f"[INFO] 隙間なし（全フレーム配置済み）")
+        except Exception as ex:
+            print(f"[INFO] 隙間検証スキップ: {ex}")
+
+    elapsed = time.time() - start_time
+    print("=" * 60)
+    if stopped:
+        print(f"[STOP] ユーザーにより中断されました。")
+    else:
+        print(f"[SUCCESS] 処理が正常に完了しました！")
+    print(f"          配置ブロック数: {success_count} (計 {success_count * BLOCK_FRAMES} フレーム)")
+    print(f"          処理時間: {elapsed:.1f}秒")
+    print("=" * 60)
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,48 @@
+# Python
+__pycache__/
+*.pyc
+
+# Generated sequence directories (output from simpleTalkGui14.py)
+*_seq/
+*_30f/
+*_60f/
+blink_30f/
+blink_60f/
+normal_30f/
+normal_60f/
+talk_30f_a/
+talk_30f_b/
+talk_60f_a/
+talk_60f_b/
+
+# Generated timing output
+timing_output/
+
+# Audio files
+wav/
+*.wav
+
+# Test/temp files
+Test.txt
+test.psd
+test.xcf
+test_*.py
+debug_*.py
+check_*.py
+
+# Generated images
+*.png
+!sample_timing.json
+
+# Document references (optional - user may want to keep)
+*.docx
+*.md
+
+# Temporary/working files
+*.txt
+*.psd
+*.xcf
+
+# IDE/OS
+.DS_Store
+Thumbs.db
