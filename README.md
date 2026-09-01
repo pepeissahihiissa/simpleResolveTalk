@@ -95,6 +95,20 @@ Resolve上でクリップ名にフォルダ名（キャラ名）とモーショ�
 
 ## ライセンス
 
-（未定）
+[MIT License](LICENSE)
 
-© 2026
+Copyright (c) 2026 Pepeissa Hihiissa
+
+## 同梱ライブラリのライセンス
+
+本ツールが利用する主なライブラリはすべて許容的なライセンスです（独自OK）。
+
+| ライブラリ | ライセンス |
+| --- | --- |
+| psd-tools | MIT |
+| Pillow | HPND（BSD系） |
+| numpy | BSD-3-Clause |
+| attrs | MIT |
+| packaging | BSD-2-Clause / Apache-2.0 |
+| Python / tkinter | PSF-2.0 |
+| PyInstaller（ビルド用） | GPL-2.0-or-later + 特別例外（ビルドしたアプリの配布は任意ライセンス可能） |
