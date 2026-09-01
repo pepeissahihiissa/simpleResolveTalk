@@ -13,7 +13,7 @@ PNGシーケンスを生成し、DaVinci Resolve に配置するためのツー�
 | `simpleTalkGui.py` | GUI本体（tkinter + psd-tools + Pillow） |
 | `character_lip_sync.py` | Resolve配置スクリプト（GUIがResolveのScriptsフォルダへ自動配備） |
 | `config.default.json` | 初期設定テンプレート（初回起動時に `config.json` を自動生成） |
-| `SimpleTalkLipSync.spec` | PyInstaller の onefile 定義 |
+| `simpleResolveTalk.spec` | PyInstaller の onefile 定義 |
 
 > `config.json` は実行時のユーザーデータ（作成キャラ・設定）を保持するため、
 > リポジトリには含めません。公開用リポジトリでは `.gitignore` により除外されます。
@@ -43,12 +43,13 @@ python -m pytest tests -q
 
 ```
 pip install pyinstaller
-python -m PyInstaller SimpleTalkLipSync.spec --noconfirm
+python -m PyInstaller simpleResolveTalk.spec --noconfirm
 ```
 
-`dist\SimpleTalkLipSync.exe` が生成されます
-（`character_lip_sync.py` と `config.default.json` を同梱。
-初回起動時に `config.json` を生成し、Resolve側スクリプトをexe横へ展開します）。
+`dist\simpleResolveTalk.exe` が生成されます
+（`character_lip_sync.py`・`config.default.json`・ガイド用スクリーンショット
+`step1.png`〜`step4.png` を同梱。初回起動時に `config.json` を生成し、
+Resolve側スクリプトをexe横へ展開します）。
 重いライブラリ（torch / scipy / skimage / cv2 等）を `excludes` で除外しているため約25MBです。
 
 ## DaVinci Resolve での使い方

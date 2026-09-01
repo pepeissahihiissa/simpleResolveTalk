@@ -34,3 +34,13 @@ def test_log_file_suffix():
 
 def test_script_name_bundled_constant():
     assert gui.RESOLVE_SCRIPT_NAME == "character_lip_sync.py"
+
+
+def test_guide_image_path_dev_returns_existing_file():
+    p = gui._guide_image_path("step1.png")
+    assert os.path.isfile(p)
+    assert os.path.basename(p) == "step1.png"
+
+
+def test_guide_image_path_missing_falls_back_to_bare_name():
+    assert gui._guide_image_path("no_such_step.png") == "no_such_step.png"

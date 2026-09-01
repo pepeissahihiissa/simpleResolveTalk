@@ -1,8 +1,8 @@
 # -*- mode: python ; coding: utf-8 -*-
 # PyInstaller ビルド定義（onefile・GUIアプリ）
-# ビルド:  pyinstaller SimpleTalkLipSync.spec --noconfirm
-# 出力:   dist/SimpleTalkLipSync.exe
-# 内包:   character_lip_sync.py（Resolveへ自動コピー）, config.default.json（初回設定）
+# ビルド:  pyinstaller simpleResolveTalk.spec --noconfirm
+# 出力:   dist/simpleResolveTalk.exe
+# 内包:   character_lip_sync.py（Resolveへ自動コピー）, config.default.json（初回設定）, step1~4.png（ガイド画像）
 
 a = Analysis(
     ["simpleTalkGui.py"],
@@ -11,6 +11,10 @@ a = Analysis(
     datas=[
         ("character_lip_sync.py", "."),
         ("config.default.json", "."),
+        ("step1.png", "."),
+        ("step2.png", "."),
+        ("step3.png", "."),
+        ("step4.png", "."),
     ],
     hiddenimports=[],
     hookspath=[],
@@ -40,7 +44,7 @@ exe = EXE(
     a.binaries,
     a.datas,
     [],
-    name="SimpleTalkLipSync",
+    name="simpleResolveTalk",
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,

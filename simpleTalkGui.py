@@ -14,7 +14,7 @@ CONFIG_FILE = "config.json"
 # PSDレイヤー名のデコードに使う文字コード。
 # 日本製PSD（Shift-JIS/CP932）はデフォルト(macroman)で化けるためcp932に設定。
 _PSD_ENCODING = "cp932"
-LOG_FILE = "simple_talk_gui.log"
+LOG_FILE = "simple_resolve_talk.log"
 RESOLVE_SCRIPT_NAME = "character_lip_sync.py"
 ORIGINALS_DIR_NAME = "originals"
 
@@ -64,6 +64,24 @@ def _find_resolve_script_dir():
         if os.path.isdir(p):
             return p
     return expand(RESOLVE_SCRIPT_DIR_CANDIDATES[0])
+
+
+def _guide_image_path(name):
+    """ガイドダイアログ用スクリーンショットのパスを解決する。
+
+    - exe実行時: 同梱データの展開先（sys._MEIPASS）
+    - 開発時: スクリプト本体のあるフォルダ
+    見つからない場合は名前一式（旧来のcwd相対）にフォールバックする。
+    """
+    meipass = getattr(sys, "_MEIPASS", None)
+    if getattr(sys, "frozen", False) and meipass:
+        p = os.path.join(meipass, name)
+        if os.path.exists(p):
+            return p
+    p = os.path.join(_app_dir(), name)
+    if os.path.exists(p):
+        return p
+    return name
 
 # 生成する状態フォルダ定義
 #   (state, frames, 説明) - talk_a/talk_b のみ可変ブロック用に交互パターン
@@ -187,9 +205,10 @@ class TutorialDialog(tk.Toplevel):
         self.lbl_text.config(text=slide["text"])
         self.lbl_page.config(text=f"{index + 1} / {len(self.slides)}")
 
-        if os.path.exists(slide["image_path"]):
+        image_path = _guide_image_path(slide["image_path"])
+        if os.path.exists(image_path):
             try:
-                img = Image.open(slide["image_path"])
+                img = Image.open(image_path)
                 img.thumbnail((868, 478), Image.Resampling.LANCZOS)
                 self.tk_img = ImageTk.PhotoImage(img)
                 self.lbl_image.config(image=self.tk_img, text="")
