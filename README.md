@@ -1,4 +1,4 @@
-# SimpleTalkLipSync
+# SimpleResolveTalk
 
 日本語PSD（レイヤー構造から表情を合成）を読み込み、口パク・まばたき用の
 PNGシーケンスを生成し、DaVinci Resolve に配置するためのツール一式です。
