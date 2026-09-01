@@ -1,24 +1,28 @@
 # Python
 __pycache__/
 *.pyc
+.pytest_cache/
 
-# Generated sequence directories (output from simpleTalkGui14.py)
+# Build artifacts (PyInstaller)
+build/
+dist/
+*.spec.bak
+
+# Local archive of work files (kept offline, not published)
+_archive/
+
+# Personal runtime data (user's real characters / settings - NOT published)
+config.json
+*.log
+
+# Generated sequence directories (output from the GUI)
 *_seq/
 *_30f/
 *_60f/
-blink_30f/
-blink_60f/
-normal_30f/
-normal_60f/
-talk_30f_a/
-talk_30f_b/
-talk_60f_a/
-talk_60f_b/
-
-# Generated timing output
+*_blink_*/
+*_normal_*/
+*_talk_*/
 timing_output/
-
-# Audio files
 wav/
 *.wav
 
@@ -32,20 +36,20 @@ check_*.py
 
 # Generated images
 *.png
-!sample_timing.json
 
-# Document references (optional - user may want to keep)
+# Document references and working media
 *.docx
 *.md
-
-# Temporary/working files
 *.txt
 *.psd
 *.xcf
 
+# (keep published docs/fixtures even though they match the broad patterns above)
+!README.md
+!requirements.txt
+!tests/
+!tests/*.py
+
 # IDE/OS
 .DS_Store
 Thumbs.db
-
-# Old versions archive
-old/

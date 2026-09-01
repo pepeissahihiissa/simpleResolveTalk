@@ -1,0 +1,9 @@
+{
+    "fps": 60,
+    "blink_min": 5.0,
+    "blink_max": 10.0,
+    "show_tutorial": true,
+    "variable_block": true,
+    "current_character": "",
+    "characters": {}
+}

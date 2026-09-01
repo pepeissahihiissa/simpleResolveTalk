@@ -14,9 +14,56 @@ CONFIG_FILE = "config.json"
 # PSDレイヤー名のデコードに使う文字コード。
 # 日本製PSD（Shift-JIS/CP932）はデフォルト(macroman)で化けるためcp932に設定。
 _PSD_ENCODING = "cp932"
-RESOLVE_SCRIPT_DIR = r"C:\ProgramData\Blackmagic Design\DaVinci Resolve\Fusion\Scripts\Utility"
+LOG_FILE = "simple_talk_gui.log"
 RESOLVE_SCRIPT_NAME = "character_lip_sync.py"
 ORIGINALS_DIR_NAME = "originals"
+
+# ResolveのWorkspace→Scriptsに表示させるスクリプト置き場の候補。
+# 環境によってProgramData/AppDataのどちらかにあるため、起動時に存在する場所を探す。
+RESOLVE_SCRIPT_DIR_CANDIDATES = [
+    r"C:\ProgramData\Blackmagic Design\DaVinci Resolve\Fusion\Scripts\Utility",
+    r"%APPDATA%\Blackmagic Design\DaVinci Resolve\Fusion\Scripts\Utility",
+    r"C:\Program Files\Blackmagic Design\DaVinci Resolve\Fusion\Scripts\Utility",
+]
+
+
+def _app_dir():
+    """設定・出力・ログなどの基準ディレクトリ。
+
+    - 開発時（.py実行）: スクリプト本体のあるフォルダ
+    - exe実行時: exe本体のあるフォルダ
+    cwd（起動時のカレントディレクトリ）に依存しないよう固定する。
+    """
+    if getattr(sys, "frozen", False):
+        return os.path.dirname(os.path.abspath(sys.executable))
+    return os.path.dirname(os.path.abspath(__file__))
+
+
+def _config_path():
+    return os.path.join(_app_dir(), CONFIG_FILE)
+
+
+def _log_path():
+    return os.path.join(_app_dir(), LOG_FILE)
+
+
+def _log(message):
+    """ログをコンソールとファイルの両方に出力する"""
+    try:
+        with open(_log_path(), "a", encoding="utf-8") as f:
+            f.write(message + "\n")
+    except Exception:
+        pass
+
+
+def _find_resolve_script_dir():
+    """ResolveのScripts/Utilityディレクトリを探す。無ければ既定値を返す。"""
+    expand = os.path.expandvars
+    for cand in RESOLVE_SCRIPT_DIR_CANDIDATES:
+        p = expand(cand)
+        if os.path.isdir(p):
+            return p
+    return expand(RESOLVE_SCRIPT_DIR_CANDIDATES[0])
 
 # 生成する状態フォルダ定義
 #   (state, frames, 説明) - talk_a/talk_b のみ可変ブロック用に交互パターン
@@ -390,15 +437,38 @@ static unsigned char im_bits[] = {
         self.check_versions_after_load()
 
     def log(self, level, message):
-        print(f"[{level.upper()}] {message}")
+        text = f"[{level.upper()}] {message}"
+        print(text)
+        _log(text)
 
     # ==========================================================================
     # 起動時チェック
     # ==========================================================================
     def script_paths(self):
-        local = os.path.join(os.getcwd(), RESOLVE_SCRIPT_NAME)
-        remote = os.path.join(RESOLVE_SCRIPT_DIR, RESOLVE_SCRIPT_NAME)
+        local = os.path.join(_app_dir(), RESOLVE_SCRIPT_NAME)
+        remote = os.path.join(_find_resolve_script_dir(), RESOLVE_SCRIPT_NAME)
         return local, remote
+
+    def ensure_local_script(self):
+        """exe実行時に内包したcharacter_lip_sync.pyをexe横へ展開する。
+
+        開発時はローカルに既にあるため何もしない。
+        """
+        if not getattr(sys, "frozen", False):
+            return True
+        try:
+            base = getattr(sys, "_MEIPASS", None)
+            if not base:
+                return False
+            bundled = os.path.join(base, RESOLVE_SCRIPT_NAME)
+            if not os.path.exists(bundled):
+                return False
+            local, _ = self.script_paths()
+            shutil.copy2(bundled, local)
+            return True
+        except Exception as e:
+            _log(f"[ERROR] ensure_local_script: {e}")
+            return False
 
     def scripts_differ(self):
         local, remote = self.script_paths()
@@ -419,6 +489,8 @@ static unsigned char im_bits[] = {
         self.after(200, self._startup_check_now)
 
     def _startup_check_now(self):
+        if not self.ensure_local_script():
+            self.log("warn", "内包スクリプトのローカル展開に失敗しました。")
         local, remote = self.script_paths()
         if not os.path.exists(local):
             messagebox.showwarning(
@@ -447,7 +519,7 @@ static unsigned char im_bits[] = {
             return
         if ans:  # はい
             try:
-                os.makedirs(RESOLVE_SCRIPT_DIR, exist_ok=True)
+                os.makedirs(os.path.dirname(remote), exist_ok=True)
                 shutil.copy2(local, remote)
                 messagebox.showinfo("成功", "最新のスクリプトを Resolve 側にコピーしました。", parent=self)
                 return
@@ -1230,7 +1302,7 @@ static unsigned char im_bits[] = {
     def originals_dir(self, base=None):
         if base is None:
             base = self.folder_base() if self.current_chara_id() else "unassigned"
-        return os.path.join(base, ORIGINALS_DIR_NAME)
+        return os.path.join(_app_dir(), base, ORIGINALS_DIR_NAME)
 
     def original_path(self, mode, base=None):
         return os.path.join(self.originals_dir(base), f"original_{mode}.png")
@@ -1421,7 +1493,7 @@ static unsigned char im_bits[] = {
 
     def dest_folder(self, state, frames, base=None):
         base = base or self.folder_base()
-        return f"{base}_{state}_{frames}"
+        return os.path.join(_app_dir(), f"{base}_{state}_{frames}")
 
     def png_fname(self, state, frame):
         """連番ファイル名: state_0000.png（Resolve側で判別できるよう state を付与）"""
@@ -1595,7 +1667,7 @@ static unsigned char im_bits[] = {
             self._update_version_labels()
             self.save_config()
             messagebox.showinfo("成功", "すべての連番PNGの生成が完了しました！")
-            os.startfile(os.getcwd())
+            os.startfile(_app_dir())
             if self.show_tutorial.get():
                 TutorialDialog(self)
 
@@ -1605,13 +1677,14 @@ static unsigned char im_bits[] = {
     # Resolveコピー
     # ==========================================================================
     def copy_script_to_resolve(self):
-        current_script_path, _ = self.script_paths()
+        self.ensure_local_script()
+        current_script_path, remote = self.script_paths()
         if not os.path.exists(current_script_path):
             messagebox.showerror("エラー", f"元スクリプト '{RESOLVE_SCRIPT_NAME}' が見つかりません。")
             return
         try:
-            os.makedirs(RESOLVE_SCRIPT_DIR, exist_ok=True)
-            shutil.copy2(current_script_path, os.path.join(RESOLVE_SCRIPT_DIR, RESOLVE_SCRIPT_NAME))
+            os.makedirs(os.path.dirname(remote), exist_ok=True)
+            shutil.copy2(current_script_path, remote)
             messagebox.showinfo("成功", "Resolveにスクリプトをコピーしました。")
         except Exception as e:
             messagebox.showerror("エラー", f"コピー失敗: {e}")
@@ -1620,9 +1693,20 @@ static unsigned char im_bits[] = {
     # 設定の保存・読込
     # ==========================================================================
     def load_config(self):
-        if os.path.exists(CONFIG_FILE):
+        path = _config_path()
+        if not os.path.exists(path) and getattr(sys, "frozen", False):
+            # exe初回起動時: 内包した既定設定を exe 横に展開する
             try:
-                with open(CONFIG_FILE, "r", encoding="utf-8") as f:
+                base = getattr(sys, "_MEIPASS", None)
+                if base:
+                    bundled = os.path.join(base, "config.default.json")
+                    if os.path.exists(bundled):
+                        shutil.copy2(bundled, path)
+            except Exception as e:
+                self.log("error", f"既定設定の展開失敗: {e}")
+        if os.path.exists(path):
+            try:
+                with open(path, "r", encoding="utf-8") as f:
                     data = json.load(f)
                     self.fps.set(data.get("fps", 60))
                     self.blink_min.set(data.get("blink_min", 5.0))
@@ -1647,7 +1731,7 @@ static unsigned char im_bits[] = {
             "characters": self.characters,
         }
         try:
-            with open(CONFIG_FILE, "w", encoding="utf-8") as f:
+            with open(_config_path(), "w", encoding="utf-8") as f:
                 json.dump(config_data, f, indent=4, ensure_ascii=False)
         except Exception as e:
             self.log("error", f"設定保存失敗: {e}")
