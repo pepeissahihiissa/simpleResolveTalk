@@ -3,5 +3,20 @@
     "blink_min": 5.0,
     "blink_max": 10.0,
     "show_tutorial": true,
-    "variable_block": true
+    "variable_block": true,
+    "current_character": "usagi",
+    "characters": {
+        "mochiko": {
+            "video_track": 2,
+            "audio_track": 1
+        },
+        "mochiko2": {
+            "video_track": 3,
+            "audio_track": 1
+        },
+        "usagi": {
+            "video_track": 3,
+            "audio_track": 2
+        }
+    }
 }
